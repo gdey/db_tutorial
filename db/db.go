@@ -1,10 +1,11 @@
-package main
+package db
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
+	"io"
 	"log"
-	"os"
 	"strings"
 	"unsafe"
 )
@@ -23,6 +24,8 @@ const (
 	PrepareSuccess PrepareResult = iota
 	PrepareUnrecognizedStatement
 	PrepareSyntaxError
+	PrepareStringTooLong
+	PrepareNegativeID
 )
 
 type ExecuteResult uint
@@ -62,7 +65,17 @@ func (r Row) Seralize() [RowSize]byte {
 	return (*(*[RowSize]byte)(unsafe.Pointer(&r)))
 }
 
-func (r Row) String() string { return fmt.Sprintf("(%d, %s, %s)", r.ID, r.Username, r.Email) }
+func (r Row) String() string {
+	userLen := bytes.IndexByte(r.Username[:], 0)
+	if userLen == -1 {
+		userLen = ColumnUsernameSize
+	}
+	emailLen := bytes.IndexByte(r.Email[:], 0)
+	if emailLen == -1 {
+		emailLen = ColumnEmailSize
+	}
+	return fmt.Sprintf("(%d, %s, %s)", r.ID, r.Username[:userLen], r.Email[:emailLen])
+}
 
 func DeseralizeRow(source *[RowSize]byte) *Row {
 	return (*Row)(unsafe.Pointer(source))
@@ -91,8 +104,8 @@ type Statement struct {
 	InsertRow *Row
 }
 
-func printPrompt() {
-	fmt.Printf("db > ")
+func printPrompt(out io.Writer) {
+	fmt.Fprintf(out, "db > ")
 }
 
 func doMetaCommand(input string) MetaCommand {
@@ -117,6 +130,16 @@ func prepareStatement(input string) (*Statement, PrepareResult) {
 			log.Printf("error: %v", err)
 			return nil, PrepareSyntaxError
 		}
+		if len(username) > ColumnUsernameSize {
+			return nil, PrepareStringTooLong
+		}
+		if len(email) > ColumnEmailSize {
+			return nil, PrepareStringTooLong
+		}
+
+		if id < 0 {
+			return nil, PrepareNegativeID
+		}
 
 		r := Row{ID: uint32(id)}
 		copy(r.Username[:], []byte(username))
@@ -133,8 +156,8 @@ func prepareStatement(input string) (*Statement, PrepareResult) {
 	}
 }
 
-func (tbl *Table) executeInsert(statement *Statement) ExecuteResult {
-	if tbl.NumRows >= TableMaxPages {
+func (tbl *Table) executeInsert(out io.Writer, statement *Statement) ExecuteResult {
+	if tbl.NumRows >= TableMaxRows {
 		return ExecuteTableFull
 	}
 	tbl.insertRow(tbl.NumRows, statement.InsertRow)
@@ -142,33 +165,33 @@ func (tbl *Table) executeInsert(statement *Statement) ExecuteResult {
 	return ExecuteSuccess
 }
 
-func (tbl *Table) executeSelect(statement *Statement) ExecuteResult {
+func (tbl *Table) executeSelect(out io.Writer, statement *Statement) ExecuteResult {
 	for i := uint32(0); i < tbl.NumRows; i++ {
 		row := DeseralizeRow(tbl.RowSlot(i))
-		fmt.Println(row)
+		fmt.Fprintln(out, row)
 	}
 	return ExecuteSuccess
 }
 
-func executeStatement(statement *Statement, table *Table) ExecuteResult {
+func executeStatement(out io.Writer, statement *Statement, table *Table) ExecuteResult {
 	if statement == nil || table == nil {
 		return ExecuteSuccess
 	}
 	switch statement.Type {
 	case StatementInsert:
-		return table.executeInsert(statement)
+		return table.executeInsert(out, statement)
 	case StatementSelect:
-		return table.executeSelect(statement)
+		return table.executeSelect(out, statement)
 	default:
 		return ExecuteSuccess
 	}
 }
 
-func main() {
+func Main(stdout, stderr io.Writer, stdin io.Reader) int {
 	table := new(Table)
-	scanner := bufio.NewScanner(os.Stdin)
+	scanner := bufio.NewScanner(stdin)
 	for {
-		printPrompt()
+		printPrompt(stdout)
 		scanner.Scan()
 
 		input := scanner.Text()
@@ -179,9 +202,9 @@ func main() {
 		if input[0] == '.' {
 			switch doMetaCommand(input) {
 			case MetaCommandExit:
-				os.Exit(0)
+				return 0
 			case MetaCommandUnrecognizedCommand:
-				fmt.Printf("Unrecognized command '%s'.\n", input)
+				fmt.Fprintf(stderr, "Unrecognized command '%s'.\n", input)
 			case MetaCommandSuccess:
 			}
 			continue
@@ -192,24 +215,31 @@ func main() {
 		case PrepareSuccess:
 		// noop
 		case PrepareSyntaxError:
-			fmt.Println("Syntax error. Could not parse statement.")
+			fmt.Fprintln(stderr, "Syntax error. Could not parse statement.")
+			continue
+		case PrepareStringTooLong:
+			fmt.Fprintln(stderr, "String is too long.")
+			continue
+		case PrepareNegativeID:
+			fmt.Fprintln(stderr, "ID must be positive.")
 			continue
 		case PrepareUnrecognizedStatement:
-			fmt.Printf("Unrecognized keyword at start of '%s'.\n", input)
+			fmt.Fprintf(stderr, "Unrecognized keyword at start of '%s'.\n", input)
 			continue
 		}
 
-		switch executeStatement(statement, table) {
+		switch executeStatement(stdout, statement, table) {
 		case ExecuteSuccess:
-			fmt.Println("Executed.")
+			fmt.Fprintln(stdout, "Executed.")
 		case ExecuteTableFull:
-			fmt.Println("Error: Table full.")
+			fmt.Fprintln(stderr, "Error: Table full.")
 		}
 
 	}
 
 	if err := scanner.Err(); err != nil {
-		fmt.Printf("error reading input: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "error reading input: %v\n", err)
+		return 1
 	}
+	return 0
 }
