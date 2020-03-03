@@ -7,5 +7,5 @@ import (
 )
 
 func main() {
-	os.Exit(db.Main(os.Stdout, os.Stderr, os.Stdin))
+	os.Exit(db.Main(os.Stdout, os.Stderr, os.Stdin, os.Args))
 }

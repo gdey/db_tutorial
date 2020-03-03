@@ -3,8 +3,11 @@ package main_test
 import (
 	"bytes"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -30,6 +33,18 @@ func (co checkOutput) Check(t *testing.T, got []byte) bool {
 
 type checkLine string
 
+func CheckOutputStrings(strs ...string) checkOutput {
+	buff := new(bytes.Buffer)
+	for i, str := range strs {
+		// check to see if all strings but the last has \n at the end.
+		if i != (len(strs)-1) && !strings.HasSuffix(str, "\n") {
+			str = str + "\n"
+		}
+		buff.WriteString(str)
+	}
+	return checkOutput(buff.Bytes())
+}
+
 func (cl checkLine) Check(t *testing.T, got []byte) bool {
 	t.Helper()
 	lines := strings.Split(string(got), "\n")
@@ -46,6 +61,37 @@ func (cl checkLine) Check(t *testing.T, got []byte) bool {
 	return false
 }
 
+func TestDatabase_Presistence(t *testing.T) {
+
+	dir, err := ioutil.TempDir("", "dbtest")
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(dir) // cleanup
+
+	buff := new(bytes.Buffer)
+	in := bytes.NewBuffer([]byte("insert 1 user1 person1@example.com\n.exit"))
+	args := []string{os.Args[0], filepath.Join(dir, "test.db")}
+	code := db.Main(buff, buff, in, args)
+	if code != 0 {
+		t.Errorf("exit code, expected 0 got %d", code)
+		return
+	}
+	if !CheckOutputStrings("db > Executed.", "db > ").Check(t, buff.Bytes()) {
+		return
+	}
+	buff.Reset()
+	in = bytes.NewBuffer([]byte("select\n.exit"))
+	code = db.Main(buff, buff, in, args)
+	if code != 0 {
+		t.Errorf("exit code, expected 0 got %d", code)
+		return
+	}
+	if !CheckOutputStrings("db > (1, user1, person1@example.com)", "Executed.", "db > ").Check(t, buff.Bytes()) {
+		return
+	}
+}
+
 func TestDatabase(t *testing.T) {
 	type tcase struct {
 		inputs []byte
@@ -53,11 +99,23 @@ func TestDatabase(t *testing.T) {
 		code   int
 	}
 
+	dir, err := ioutil.TempDir("", "dbtest")
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(dir) // cleanup
+
 	fn := func(tc tcase) func(*testing.T) {
 		return func(t *testing.T) {
 			buff := new(bytes.Buffer)
 			in := bytes.NewBuffer(tc.inputs)
-			code := db.Main(buff, buff, in)
+			args := []string{
+				os.Args[0],
+				filepath.Join(dir,
+					filepath.Base(t.Name())+".db",
+				),
+			}
+			code := db.Main(buff, buff, in, args)
 			if tc.check != nil && !tc.check(t, buff.Bytes()) {
 				return
 			}
