@@ -3,6 +3,7 @@ package db
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -231,6 +232,39 @@ func NewPager(filename string) (*Pager, error) {
 	}, nil
 }
 
+type Cursor struct {
+	table      *Table
+	rowNumber  uint32
+	EndOfTable bool
+}
+
+func (cur *Cursor) Advance() {
+	if cur == nil {
+		return
+	}
+	cur.rowNumber++
+	if cur.rowNumber >= cur.table.NumRows {
+		cur.EndOfTable = true
+	}
+}
+
+func (cur *Cursor) Value() (*[RowSize]byte, error) {
+	if cur == nil {
+		return nil, errors.New("cur is nil")
+	}
+	var (
+		rowNum    = cur.rowNumber
+		pageNum   = rowNum / RowsPerPage
+		rowOffset = rowNum % RowsPerPage
+	)
+	page, err := cur.table.Pager.Get(int(pageNum))
+	if err != nil {
+		return nil, err
+	}
+	return &(page[rowOffset]), nil
+
+}
+
 type Table struct {
 	NumRows uint32
 	Pager   *Pager
@@ -273,6 +307,22 @@ func (tbl *Table) Close() (err error) {
 		return err
 	}
 	return nil
+}
+
+func (tbl *Table) CursorAtStart() *Cursor {
+	return &Cursor{
+		table:      tbl,
+		rowNumber:  0,
+		EndOfTable: tbl.NumRows == 0,
+	}
+}
+
+func (tbl *Table) CursorAtEnd() *Cursor {
+	return &Cursor{
+		table:      tbl,
+		rowNumber:  tbl.NumRows,
+		EndOfTable: true,
+	}
 }
 
 func DBOpen(filename string) (*Table, error) {
@@ -357,15 +407,18 @@ func (tbl *Table) executeInsert(out io.Writer, statement *Statement) ExecuteResu
 }
 
 func (tbl *Table) executeSelect(out io.Writer, statement *Statement) ExecuteResult {
-	for i := uint32(0); i < tbl.NumRows; i++ {
+	cursor := tbl.CursorAtStart()
+	for !cursor.EndOfTable {
 
-		rowbyte, err := tbl.RowSlot(i)
+		rowbyte, err := cursor.Value() //tbl.RowSlot(i)
 		if err != nil {
 			fmt.Fprintf(out, "failed to get row, %v", err)
 			return ExecuteFailedFile
 		}
 		row := DeseralizeRow(rowbyte)
 		fmt.Fprintln(out, row)
+
+		cursor.Advance()
 	}
 	return ExecuteSuccess
 }
